@@ -1,8 +1,11 @@
 fastapi
 uvicorn
+pydantic
 python-jose
-passlib
-databases
+databases[postgresql]
 sqlalchemy
 psycopg2-binary
 python-multipart
+bcrypt
+passlib
+databases
