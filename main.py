@@ -11,14 +11,9 @@ import json
 from fastapi.middleware.cors import CORSMiddleware
 
 
-# =======================================================
-#  DATABASE CONFIG — FULLY RENDER COMPATIBLE
-# =======================================================
-
 if "DATABASE_URL" in os.environ:
     raw_url = os.environ["DATABASE_URL"]
 
-    # Render uses "postgres://" but SQLAlchemy requires "postgresql://"
     if raw_url.startswith("postgres://"):
         raw_url = raw_url.replace("postgres://", "postgresql://", 1)
 
@@ -28,10 +23,6 @@ else:
     DATABASE_URL = f"sqlite:///{os.path.abspath('seizure.db')}"
     print("➡ Using SQLite fallback:", DATABASE_URL)
 
-
-# =======================================================
-#  DATABASE INIT
-# =======================================================
 database = databases.Database(DATABASE_URL)
 metadata = sqlalchemy.MetaData()
 
@@ -43,9 +34,6 @@ engine = sqlalchemy.create_engine(
 app = FastAPI(title="Seizure Monitor Backend")
 
 
-# =======================================================
-#  TABLE DEFINITIONS
-# =======================================================
 users = sqlalchemy.Table(
     "users", metadata,
     sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
@@ -81,18 +69,12 @@ seizure_events = sqlalchemy.Table(
 metadata.create_all(engine)
 
 
-# =======================================================
-#  AUTH / TOKEN SETUP
-# =======================================================
 SECRET_KEY = os.environ.get("SECRET_KEY", "CHANGE_THIS_SECRET")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 
 
-# =======================================================
-#  PYDANTIC MODELS
-# =======================================================
 class UserCreate(BaseModel):
     username: str
     password: str
@@ -125,9 +107,6 @@ class DevicePayload(BaseModel):
     seizure_flag: bool = False
 
 
-# =======================================================
-#  AUTH HELPERS
-# =======================================================
 async def get_user_by_username(username: str):
     return await database.fetch_one(users.select().where(users.c.username == username))
 
@@ -164,9 +143,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     return user
 
 
-# =======================================================
-#  STARTUP / SHUTDOWN
-# =======================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -186,16 +162,11 @@ async def shutdown():
     await database.disconnect()
 
 
-# =======================================================
-#  ROUTES
-# =======================================================
-
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok", "db": DATABASE_URL}
 
 
-# ------------------ REGISTER USER ------------------ #
 @app.post("/api/register")
 async def register(u: UserCreate):
     if await get_user_by_username(u.username):
@@ -206,7 +177,6 @@ async def register(u: UserCreate):
     return {"id": user_id, "username": u.username}
 
 
-# ------------------ LOGIN ------------------ #
 @app.post("/api/login", response_model=Token)
 async def login(body: LoginRequest):
     user = await authenticate_user(body.username, body.password)
@@ -221,7 +191,6 @@ async def login(body: LoginRequest):
     return {"access_token": token, "token_type": "bearer"}
 
 
-# ------------------ GET ME ------------------ #
 @app.get("/api/me")
 async def get_me(current_user=Depends(get_current_user)):
     return {
@@ -231,7 +200,6 @@ async def get_me(current_user=Depends(get_current_user)):
     }
 
 
-# ------------------ REGISTER DEVICE ------------------ #
 @app.post("/api/devices/register")
 async def register_device(d: DeviceRegister, current_user=Depends(get_current_user)):
     my_devices = await database.fetch_all(devices.select().where(devices.c.user_id == current_user["id"]))
@@ -250,8 +218,6 @@ async def register_device(d: DeviceRegister, current_user=Depends(get_current_us
     )
     return {"status": "ok", "device_id": d.device_id}
 
-
-# ------------------ LIST MY DEVICES ------------------ #
 @app.get("/api/mydevices")
 async def get_my_devices(current_user=Depends(get_current_user)):
     rows = await database.fetch_all(devices.select().where(devices.c.user_id == current_user["id"]))
@@ -283,7 +249,6 @@ async def get_my_devices(current_user=Depends(get_current_user)):
     return output
 
 
-# ------------------ UPDATE DEVICE ------------------ #
 @app.put("/api/devices/{device_id}")
 async def update_device(device_id: str, body: DeviceUpdate, current_user=Depends(get_current_user)):
     row = await database.fetch_one(
@@ -299,7 +264,6 @@ async def update_device(device_id: str, body: DeviceUpdate, current_user=Depends
     return {"status": "updated", "device_id": device_id, "label": body.label}
 
 
-# ------------------ DELETE DEVICE ------------------ #
 @app.delete("/api/devices/{device_id}")
 async def delete_device(device_id: str, current_user=Depends(get_current_user)):
     row = await database.fetch_one(
@@ -312,7 +276,6 @@ async def delete_device(device_id: str, current_user=Depends(get_current_user)):
     return {"status": "deleted", "device_id": device_id}
 
 
-# ------------------ RECEIVE DEVICE DATA ------------------ #
 @app.post("/api/devices/data")
 async def receive_device_data(payload: DevicePayload):
     device_row = await database.fetch_one(devices.select().where(devices.c.device_id == payload.device_id))
@@ -327,7 +290,6 @@ async def receive_device_data(payload: DevicePayload):
         payload=json.dumps(payload.dict())
     ))
 
-    # SEIZURE EVENT LOGIC
     if payload.seizure_flag:
         user_id = device_row["user_id"]
         window_start = datetime.utcnow() - timedelta(seconds=5)
@@ -363,7 +325,6 @@ async def receive_device_data(payload: DevicePayload):
     return {"status": "ok"}
 
 
-# ------------------ DEVICE HISTORY ------------------ #
 @app.get("/api/devices/{device_id}", response_model=List[dict])
 async def get_device_history(device_id: str, current_user=Depends(get_current_user)):
     r = await database.fetch_one(
@@ -392,7 +353,6 @@ async def get_device_history(device_id: str, current_user=Depends(get_current_us
     return result
 
 
-# ------------------ ADMIN USERS ------------------ #
 @app.get("/api/users")
 async def list_users(current_user=Depends(get_current_user)):
     if not current_user["is_admin"]:
@@ -402,7 +362,6 @@ async def list_users(current_user=Depends(get_current_user)):
     return [{"id": r["id"], "username": r["username"], "is_admin": r["is_admin"]} for r in rows]
 
 
-# ------------------ SEIZURE EVENTS ------------------ #
 @app.get("/api/seizure_events")
 async def get_seizure_events(current_user=Depends(get_current_user)):
     rows = await database.fetch_all(
@@ -434,9 +393,6 @@ async def get_all_seizure_events(current_user=Depends(get_current_user)):
     return [{"timestamp": r["timestamp"].isoformat(), "device_ids": r["device_ids"].split(",")} for r in rows]
 
 
-# =======================================================
-#  MAIN ENTRY
-# =======================================================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
