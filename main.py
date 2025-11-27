@@ -460,6 +460,7 @@ async def get_my_devices_with_latest(current_user=Depends(get_current_user)):
     - last_sync (timestamp)
     - battery_percent
     - mag_x, mag_y, mag_z
+    - connected: True/False based on last sync within 60s
     """
     user_devices = await database.fetch_all(devices.select().where(devices.c.user_id == current_user["id"]))
     output = []
@@ -479,11 +480,15 @@ async def get_my_devices_with_latest(current_user=Depends(get_current_user)):
             mag_y = latest_sensor["mag_y"]
             mag_z = latest_sensor["mag_z"]
             seizure_flag = latest_sensor["seizure_flag"]
+
+            # Determine if device is connected (last 60s)
+            connected = (datetime.utcnow() - last_sync).total_seconds() <= 60
         else:
             last_sync = None
             battery_percent = 100
             mag_x = mag_y = mag_z = 0
             seizure_flag = False
+            connected = False
 
         output.append({
             "device_id": d["device_id"],
@@ -493,10 +498,12 @@ async def get_my_devices_with_latest(current_user=Depends(get_current_user)):
             "mag_x": mag_x,
             "mag_y": mag_y,
             "mag_z": mag_z,
-            "seizure_flag": seizure_flag
+            "seizure_flag": seizure_flag,
+            "connected": connected
         })
 
     return output
+
 
 
 if __name__ == "__main__":
