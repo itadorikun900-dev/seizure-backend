@@ -277,7 +277,7 @@ async def receive_device_data(payload: DevicePayload):
     if not device_row:
         raise HTTPException(status_code=403, detail="Device not registered")
 
-    ts = datetime.utcfromtimestamp(payload.timestamp_ms / 1000.0)
+    ts = datetime.fromtimestamp(payload.timestamp_ms / 1000.0, tz=PHT)
     await database.execute(device_data.insert().values(
         device_id=payload.device_id,
         timestamp=ts,
@@ -394,7 +394,7 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
     if not existing:
         raise HTTPException(status_code=403, detail="Unknown device_id")
 
-    ts = datetime.utcfromtimestamp(payload.timestamp_ms / 1000.0)
+    ts = datetime.fromtimestamp(payload.timestamp_ms / 1000.0, tz=PHT)
 
     await database.execute(sensor_data.insert().values(
         device_id=payload.device_id,
