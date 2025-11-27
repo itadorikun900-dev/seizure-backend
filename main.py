@@ -305,7 +305,7 @@ async def receive_device_data(payload: DevicePayload):
     if not device_row:
         raise HTTPException(status_code=403, detail="Device not registered")
 
-    # Use timestamp from the device EXACTLY as is (PHT)
+    # Use timestamp from the device exactly as sent
     ts = datetime.fromtimestamp(payload.timestamp_ms / 1000.0, tz=PHT)
 
     await database.execute(device_data.insert().values(
@@ -314,10 +314,10 @@ async def receive_device_data(payload: DevicePayload):
         payload=json.dumps(payload.dict())
     ))
 
-    # Seizure window uses local time, not UTC
+    # Seizure detection using device timestamps, not server time
     if payload.seizure_flag:
         user_id = device_row["user_id"]
-        window_start = datetime.now(PHT) - timedelta(seconds=5)
+        window_start = ts - timedelta(seconds=5)  # 5-second window based on device timestamp
 
         user_devices = await database.fetch_all(devices.select().where(devices.c.user_id == user_id))
         ids = [d["device_id"] for d in user_devices]
@@ -343,11 +343,14 @@ async def receive_device_data(payload: DevicePayload):
             if not existing_event:
                 await database.execute(seizure_events.insert().values(
                     user_id=user_id,
-                    timestamp=datetime.now(PHT),
+                    timestamp=ts,  # Use device timestamp for seizure event
                     device_ids=",".join(triggered)
                 ))
 
     return {"status": "ok"}
+
+
+
 
 # =======================
 #   DEVICE HISTORY
@@ -426,6 +429,7 @@ async def get_all_seizure_events(current_user=Depends(get_current_user)):
         "device_ids": r["device_ids"].split(",")
     } for r in rows]
 
+
 # =======================
 #   ESP32 UPLOAD
 # =======================
@@ -438,8 +442,10 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
     if not existing:
         raise HTTPException(status_code=403, detail="Unknown device_id")
 
+    # Convert device timestamp to timezone-aware datetime
     ts = datetime.fromtimestamp(payload.timestamp_ms / 1000.0, tz=PHT)
 
+    # Insert into sensor_data
     await database.execute(sensor_data.insert().values(
         device_id=payload.device_id,
         timestamp=ts,
@@ -450,6 +456,7 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
         seizure_flag=payload.seizure_flag
     ))
 
+    # Insert raw payload for history
     raw_json = {
         "device_id": payload.device_id,
         "timestamp_ms": payload.timestamp_ms,
@@ -466,14 +473,12 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
         payload=json.dumps(raw_json)
     ))
 
-    # Seizure aggregation (local time)
+    # Seizure aggregation using device timestamp
     if payload.seizure_flag:
         user_id = existing["user_id"]
-        window_start = datetime.now(PHT) - timedelta(seconds=5)
+        window_start = ts - timedelta(seconds=5)  # 5-second window
 
-        user_devices = await database.fetch_all(
-            devices.select().where(devices.c.user_id == user_id)
-        )
+        user_devices = await database.fetch_all(devices.select().where(devices.c.user_id == user_id))
         ids = [d["device_id"] for d in user_devices]
 
         recent_rows = await database.fetch_all(
@@ -497,7 +502,7 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
             if not recent_log:
                 await database.execute(seizure_events.insert().values(
                     user_id=user_id,
-                    timestamp=datetime.now(PHT),
+                    timestamp=ts,  # device timestamp
                     device_ids=",".join(triggered)
                 ))
 
