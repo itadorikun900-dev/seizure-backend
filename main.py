@@ -11,7 +11,7 @@ import json
 from fastapi.middleware.cors import CORSMiddleware
 
 # ----------------- PH TIMEZONE -----------------
-PHT = timezone(timedelta(hours=8))  # UTC+8
+PHT = timezone(timedelta(hours=8))
 
 # ----------------- DATABASE CONFIG -----------------
 if "DATABASE_URL" in os.environ:
@@ -232,13 +232,22 @@ async def get_my_devices(current_user=Depends(get_current_user)):
         if latest_data:
             payload = json.loads(latest_data["payload"])
             battery_percent = payload.get("battery_percent", 100)
-            last_sync = latest_data["timestamp"].astimezone(PHT)
-        output.append({
-            "device_id": r["device_id"],
-            "label": r["label"],
-            "battery_percent": battery_percent,
-            "last_sync": last_sync.isoformat() if last_sync else None
-        })
+            ts = latest_data["timestamp"].astimezone(PHT)
+            now = datetime.now(PHT)
+            diff = (now - ts).total_seconds()
+
+            if diff <= 10:
+                last_sync_val = "Just now"
+            else:
+                last_sync_val = ts.isoformat()
+
+            output.append({
+                "device_id": r["device_id"],
+                "label": r["label"],
+                "battery_percent": battery_percent,
+                "last_sync": last_sync_val
+            })
+
     return output
 
 @app.put("/api/devices/{device_id}")
@@ -458,7 +467,13 @@ async def get_my_devices_with_latest(current_user=Depends(get_current_user)):
         )
 
         if latest_sensor:
-            last_sync = latest_sensor["timestamp"].astimezone(PHT)
+            ts = latest_sensor["timestamp"].astimezone(PHT)
+            now = datetime.now(PHT)
+            diff = (now - ts).total_seconds()
+            if diff <= 10:
+                last_sync_val = "Just now"
+            else:
+                last_sync_val = ts.isoformat()
             battery_percent = latest_sensor["battery_percent"]
             mag_x = latest_sensor["mag_x"]
             mag_y = latest_sensor["mag_y"]
@@ -476,13 +491,14 @@ async def get_my_devices_with_latest(current_user=Depends(get_current_user)):
             "device_id": d["device_id"],
             "label": d["label"],
             "battery_percent": battery_percent,
-            "last_sync": last_sync.isoformat() if last_sync else None,
+            "last_sync": last_sync_val,
             "mag_x": mag_x,
             "mag_y": mag_y,
             "mag_z": mag_z,
             "seizure_flag": seizure_flag,
             "connected": connected
         })
+
 
     return output
 
