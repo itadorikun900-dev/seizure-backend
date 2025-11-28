@@ -9,6 +9,7 @@ from fastapi.security import OAuth2PasswordBearer
 import os
 import json
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 
 # =======================
 #   PH TIMEZONE
@@ -16,7 +17,6 @@ from fastapi.middleware.cors import CORSMiddleware
 PHT = timezone(timedelta(hours=8))
 
 def to_pht(dt_utc: datetime) -> datetime:
-    """Convert UTC datetime to PHT"""
     if dt_utc.tzinfo is None:
         dt_utc = dt_utc.replace(tzinfo=timezone.utc)
     return dt_utc.astimezone(PHT)
@@ -29,14 +29,11 @@ if "DATABASE_URL" in os.environ:
     if raw_url.startswith("postgres://"):
         raw_url = raw_url.replace("postgres://", "postgresql://", 1)
     DATABASE_URL = raw_url
-    print("➡ Using PostgreSQL:", DATABASE_URL)
 else:
     DATABASE_URL = f"sqlite:///{os.path.abspath('seizure.db')}"
-    print("➡ Using SQLite fallback:", DATABASE_URL)
 
 database = databases.Database(DATABASE_URL)
 metadata = sqlalchemy.MetaData()
-
 engine = sqlalchemy.create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -130,6 +127,9 @@ class UnifiedESP32Payload(BaseModel):
     mag_y: int
     mag_z: int
 
+# =======================
+#   HELPER FUNCTIONS
+# =======================
 async def get_user_by_username(username: str):
     return await database.fetch_one(users.select().where(users.c.username == username))
 
@@ -171,11 +171,46 @@ app.add_middleware(
 )
 
 # =======================
+#   DEVICE CONNECTION LOGGING
+# =======================
+device_states = {}  # device_id -> connected
+
+async def log_device_status_changes():
+    while True:
+        now = datetime.now(PHT)
+        all_devices = await database.fetch_all(devices.select())
+        for d in all_devices:
+            user_row = await database.fetch_one(users.select().where(users.c.id == d["user_id"]))
+            username = user_row["username"] if user_row else "Unknown"
+
+            latest = await database.fetch_one(
+                sensor_data.select()
+                .where(sensor_data.c.device_id == d["device_id"])
+                .order_by(sensor_data.c.timestamp.desc())
+                .limit(1)
+            )
+
+            connected = False
+            if latest:
+                ts = to_pht(latest["timestamp"])
+                diff = (now - ts).total_seconds()
+                connected = diff <= 5  # 5 seconds for connected
+
+            last_state = device_states.get(d["device_id"])
+            if last_state != connected:
+                status = "CONNECTED" if connected else "DISCONNECTED"
+                print(f"[{now.isoformat()}] Device {d['device_id']} (Owner: {username}) is {status}")
+                device_states[d["device_id"]] = connected
+
+        await asyncio.sleep(1)
+
+# =======================
 #   LIFECYCLE
 # =======================
 @app.on_event("startup")
 async def startup():
     await database.connect()
+    asyncio.create_task(log_device_status_changes())
 
 @app.on_event("shutdown")
 async def shutdown():
