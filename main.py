@@ -332,12 +332,14 @@ async def get_device_history(device_id: str, current_user=Depends(get_current_us
     )
     if not r:
         raise HTTPException(status_code=403, detail="Not your device")
+    
     rows = await database.fetch_all(
         device_data.select()
         .where(device_data.c.device_id == device_id)
         .order_by(device_data.c.timestamp.desc())
         .limit(1000)
     )
+
     result = []
     for row in rows:
         payload = json.loads(row["payload"])
@@ -345,11 +347,12 @@ async def get_device_history(device_id: str, current_user=Depends(get_current_us
         result.append({
             "id": row["id"],
             "device_id": row["device_id"],
-            "timestamp": ts.isoformat(),
+            "timestamp": ts.strftime("%I:%M %p"),  # <- 12-hour PH time
             "payload": payload,
             "battery_percent": payload.get("battery_percent", 100),
         })
     return result
+
 
 # =======================
 #   SEIZURE EVENTS
@@ -362,9 +365,10 @@ async def get_seizure_events(current_user=Depends(get_current_user)):
         .order_by(seizure_events.c.timestamp.desc())
     )
     return [{
-        "timestamp": to_pht(r["timestamp"]).isoformat(),
+        "timestamp": to_pht(r["timestamp"]).strftime("%I:%M %p"),
         "device_ids": r["device_ids"].split(",")
     } for r in rows]
+
 
 @app.get("/api/seizure_events/latest")
 async def get_latest_event(current_user=Depends(get_current_user)):
@@ -377,9 +381,10 @@ async def get_latest_event(current_user=Depends(get_current_user)):
     if not row:
         return {}
     return {
-        "timestamp": to_pht(row["timestamp"]).isoformat(),
+        "timestamp": to_pht(row["timestamp"]).strftime("%I:%M %p"),
         "device_ids": row["device_ids"].split(",")
     }
+
 
 @app.get("/api/seizure_events/all")
 async def get_all_seizure_events(current_user=Depends(get_current_user)):
@@ -387,7 +392,7 @@ async def get_all_seizure_events(current_user=Depends(get_current_user)):
         seizure_events.select().order_by(seizure_events.c.timestamp.desc())
     )
     return [{
-        "timestamp": to_pht(r["timestamp"]).isoformat(),
+        "timestamp": to_pht(r["timestamp"]).strftime("%I:%M %p"),
         "device_ids": r["device_ids"].split(",")
     } for r in rows]
 
@@ -473,7 +478,9 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
 # =======================
 @app.get("/api/mydevices_with_latest_data")
 async def get_my_devices_with_latest(current_user=Depends(get_current_user)):
-    user_devices = await database.fetch_all(devices.select().where(devices.c.user_id == current_user["id"]))
+    user_devices = await database.fetch_all(
+        devices.select().where(devices.c.user_id == current_user["id"])
+    )
     output = []
     now = datetime.now(PHT)
     for d in user_devices:
@@ -486,7 +493,7 @@ async def get_my_devices_with_latest(current_user=Depends(get_current_user)):
         if latest:
             ts_ph = to_pht(latest["timestamp"])
             diff = (now - ts_ph).total_seconds()
-            last_sync_val = "Just now" if diff <= 10 else ts_ph.strftime("%H:%M")
+            last_sync_val = "Just now" if diff <= 10 else ts_ph.strftime("%I:%M %p")
             connected = diff <= 5
         else:
             last_sync_val = None
