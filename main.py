@@ -361,20 +361,20 @@ async def get_all_seizure_events(current_user=Depends(get_current_user)):
 # =======================
 @app.post("/api/device/upload")
 async def upload_from_esp(payload: UnifiedESP32Payload):
-    # Check if device exists
     existing = await database.fetch_one(
         devices.select().where(devices.c.device_id == payload.device_id)
     )
     if not existing:
         raise HTTPException(status_code=403, detail="Unknown device_id")
 
-    # Convert milliseconds to UTC datetime
+    # --- FIXED TIMESTAMP HANDLING ---
     ts_val = payload.timestamp_ms
-    if ts_val > 1e10:  # Treat as milliseconds
+    # Only divide if timestamp is in milliseconds
+    if ts_val > 1e12:  
         ts_val = ts_val / 1000.0
+
     ts_utc = datetime.utcfromtimestamp(ts_val).replace(tzinfo=timezone.utc)
 
-    # Insert sensor data
     await database.execute(sensor_data.insert().values(
         device_id=payload.device_id,
         timestamp=ts_utc,
@@ -385,7 +385,6 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
         seizure_flag=payload.seizure_flag
     ))
 
-    # Insert raw JSON payload
     raw_json = {
         "device_id": payload.device_id,
         "timestamp_ms": payload.timestamp_ms,
