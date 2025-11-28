@@ -9,19 +9,17 @@ import databases
 import json
 import os
 from jose import JWTError, jwt
-# Removed: from passlib.context import CryptContext
+from passlib.context import CryptContext
 
 # =======================
 # PH TIMEZONE
 # =======================
 PHT = timezone(timedelta(hours=8))
-UTC = timezone.utc # Defined UTC for conversion
 
 def now_pht():
     return datetime.now(PHT)
 
 def from_ms_to_pht(ms: int):
-    # Ensure all timestamps are created explicitly PHT aware
     return datetime.fromtimestamp(ms / 1000.0, tz=PHT)
 
 # =======================
@@ -86,8 +84,13 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "CHANGE_THIS_SECRET")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Removed hash_password and verify_password functions.
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+def verify_password(plain_password, hashed):
+    return pwd_context.verify(plain_password, hashed)
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
@@ -100,8 +103,7 @@ async def get_user_by_username(username: str):
 
 async def authenticate_user(username: str, password: str):
     user = await get_user_by_username(username)
-    # Using raw password comparison
-    if not user or password != user["password"]:
+    if not user or not verify_password(password, user["password"]):
         return None
     return user
 
@@ -182,7 +184,6 @@ async def log_device_connection(device_id: str, ts: datetime):
 def is_connected(last_seen: datetime, timeout: int = 60):
     if not last_seen:
         return False
-    # This subtraction is fine because both are explicit PHT-aware datetimes
     return (now_pht() - last_seen).total_seconds() <= timeout
 
 # =======================
@@ -198,7 +199,7 @@ async def register(u: UserCreate):
         raise HTTPException(status_code=400, detail="Username exists")
     user_id = await database.execute(users.insert().values(
         username=u.username,
-        password=u.password, # Storing raw password
+        password=hash_password(u.password),
         is_admin=u.is_admin
     ))
     return {"id": user_id, "username": u.username}
@@ -249,7 +250,7 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
 
     ts = from_ms_to_pht(payload.timestamp_ms)
 
-    # Save sensor data (ts is PHT-aware and saved to DB)
+    # Save sensor data
     await database.execute(sensor_data.insert().values(
         device_id=payload.device_id,
         timestamp=ts,
@@ -266,19 +267,14 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
     # Seizure detection (window=5s, trigger if 3 devices report seizure)
     if payload.seizure_flag:
         user_id = device["user_id"]
-        window_start_pht = ts - timedelta(seconds=5)
-        
-        # FIX: Convert the PHT-aware comparison point to UTC-aware datetime.
-        # This resolves the `offset-naive and offset-aware` error when asyncpg binds the query parameter.
-        window_start_utc = window_start_pht.astimezone(UTC)
-        
+        window_start = ts - timedelta(seconds=5)
         user_devices = await database.fetch_all(devices.select().where(devices.c.user_id == user_id))
         ids = [d["device_id"] for d in user_devices]
 
         recent_rows = await database.fetch_all(
             sensor_data.select()
             .where(sensor_data.c.device_id.in_(ids))
-            .where(sensor_data.c.timestamp >= window_start_utc) # Use UTC-aware datetime for comparison
+            .where(sensor_data.c.timestamp >= window_start)
         )
 
         triggered = list({r["device_id"] for r in recent_rows if r["seizure_flag"]})
@@ -287,7 +283,7 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
             existing_event = await database.fetch_one(
                 seizure_events.select()
                 .where(seizure_events.c.user_id == user_id)
-                .where(seizure_events.c.timestamp >= window_start_pht) # Use PHT-aware ts for seizure event time
+                .where(seizure_events.c.timestamp >= window_start)
             )
             if not existing_event:
                 await database.execute(seizure_events.insert().values(
