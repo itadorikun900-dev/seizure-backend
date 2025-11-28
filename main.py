@@ -16,10 +16,18 @@ from jose import JWTError, jwt
 PHT = timezone(timedelta(hours=8))
 
 def now_pht():
+    """Return current PHT datetime (tz-aware)."""
     return datetime.now(PHT)
 
 def from_ms_to_pht(ms: int):
+    """Convert milliseconds timestamp to PHT tz-aware datetime."""
     return datetime.fromtimestamp(ms / 1000.0, tz=PHT)
+
+def make_aware(dt: datetime):
+    """Ensure datetime is tz-aware in PHT."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=PHT)
+    return dt
 
 # =======================
 # DATABASE CONFIG
@@ -51,14 +59,14 @@ devices = sqlalchemy.Table(
     sqlalchemy.Column("user_id", sqlalchemy.Integer, sqlalchemy.ForeignKey("users.id")),
     sqlalchemy.Column("device_id", sqlalchemy.String, unique=True),
     sqlalchemy.Column("label", sqlalchemy.String),
-    sqlalchemy.Column("last_seen", sqlalchemy.DateTime, nullable=True),
+    sqlalchemy.Column("last_seen", sqlalchemy.DateTime(timezone=True), nullable=True),
 )
 
 sensor_data = sqlalchemy.Table(
     "sensor_data", metadata,
     sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
     sqlalchemy.Column("device_id", sqlalchemy.String, index=True),
-    sqlalchemy.Column("timestamp", sqlalchemy.DateTime, index=True),
+    sqlalchemy.Column("timestamp", sqlalchemy.DateTime(timezone=True), index=True),
     sqlalchemy.Column("mag_x", sqlalchemy.Integer),
     sqlalchemy.Column("mag_y", sqlalchemy.Integer),
     sqlalchemy.Column("mag_z", sqlalchemy.Integer),
@@ -70,7 +78,7 @@ seizure_events = sqlalchemy.Table(
     "seizure_events", metadata,
     sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
     sqlalchemy.Column("user_id", sqlalchemy.Integer, sqlalchemy.ForeignKey("users.id")),
-    sqlalchemy.Column("timestamp", sqlalchemy.DateTime),
+    sqlalchemy.Column("timestamp", sqlalchemy.DateTime(timezone=True)),
     sqlalchemy.Column("device_ids", sqlalchemy.String),
 )
 
@@ -169,6 +177,7 @@ class UnifiedESP32Payload(BaseModel):
 # HELPERS
 # =======================
 async def log_device_connection(device_id: str, ts: datetime):
+    ts = make_aware(ts)
     await database.execute(
         devices.update().where(devices.c.device_id == device_id).values(last_seen=ts)
     )
@@ -176,6 +185,7 @@ async def log_device_connection(device_id: str, ts: datetime):
 def is_connected(last_seen: datetime, timeout: int = 60):
     if not last_seen:
         return False
+    last_seen = make_aware(last_seen)
     return (now_pht() - last_seen).total_seconds() <= timeout
 
 # =======================
@@ -207,6 +217,7 @@ async def login(body: LoginRequest):
     )
     return {"access_token": token, "token_type": "bearer"}
 
+# -----------------------
 # DEVICE MANAGEMENT
 @app.post("/api/devices/register")
 async def register_device(d: DeviceRegister, current_user=Depends(get_current_user)):
@@ -231,7 +242,6 @@ async def update_device(device_id: str, body: DeviceUpdate, current_user=Depends
 
 # -----------------------
 # DEVICE DATA UPLOAD
-# -----------------------
 @app.post("/api/device/upload")
 async def upload_from_esp(payload: UnifiedESP32Payload):
     device = await database.fetch_one(devices.select().where(devices.c.device_id == payload.device_id))
@@ -239,6 +249,7 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
         raise HTTPException(status_code=403, detail="Unknown device")
 
     ts = from_ms_to_pht(payload.timestamp_ms)
+    ts = make_aware(ts)  # ensure tz-aware
 
     # Save sensor data
     await database.execute(sensor_data.insert().values(
@@ -286,7 +297,6 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
 
 # -----------------------
 # DEVICES + LATEST DATA
-# -----------------------
 @app.get("/api/mydevices_with_latest_data")
 async def my_devices_with_latest(current_user=Depends(get_current_user)):
     user_devices = await database.fetch_all(devices.select().where(devices.c.user_id == current_user["id"]))
@@ -319,7 +329,6 @@ async def my_devices_with_latest(current_user=Depends(get_current_user)):
 
 # -----------------------
 # ROOT
-# -----------------------
 @app.get("/")
 async def root():
     return {"message": "Backend running"}
