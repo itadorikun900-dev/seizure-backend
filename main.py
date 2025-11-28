@@ -402,9 +402,7 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
     if not existing:
         raise HTTPException(status_code=403, detail="Unknown device_id")
 
-    # --- FIXED TIMESTAMP HANDLING ---
     ts_val = payload.timestamp_ms
-    # Only divide if timestamp is in milliseconds
     if ts_val > 1e12:  
         ts_val = ts_val / 1000.0
 
@@ -436,7 +434,6 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
         payload=json.dumps(raw_json)
     ))
 
-    # Handle seizure detection
     if payload.seizure_flag:
         user_id = existing["user_id"]
         window_start = ts_utc - timedelta(seconds=5)
@@ -490,7 +487,7 @@ async def get_my_devices_with_latest(current_user=Depends(get_current_user)):
             now = datetime.now(PHT)
             diff = (now - ts).total_seconds()
             last_sync_val = "Just now" if diff <= 10 else ts.isoformat()
-            connected = diff <= 60
+            connected = diff <= 5
         else:
             last_sync_val = None
             connected = False
