@@ -291,9 +291,11 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
 # -----------------------
 @app.get("/api/mydevices_with_latest_data")
 async def my_devices_with_latest(current_user=Depends(get_current_user)):
-    user_devices = await database.fetch_all(devices.select().where(devices.c.user_id == current_user["id"]))
+    user_devices = await database.fetch_all(
+        devices.select().where(devices.c.user_id == current_user["id"])
+    )
     output = []
-    now = now_pht()
+
     for d in user_devices:
         latest = await database.fetch_one(
             sensor_data.select()
@@ -301,23 +303,28 @@ async def my_devices_with_latest(current_user=Depends(get_current_user)):
             .order_by(sensor_data.c.timestamp.desc())
             .limit(1)
         )
-        last_sync = latest["timestamp"].isoformat() if latest else None
+
+        last_sync_ms = int(latest["timestamp"].timestamp() * 1000) if latest else None
         battery = latest["battery_percent"] if latest else 100
         seizure_flag = latest["seizure_flag"] if latest else False
+
         connected = is_connected(d["last_seen"])
+
         output.append({
             "device_id": d["device_id"],
             "label": d["label"],
             "battery_percent": battery,
-            "last_sync": last_sync,
-            "last_seen": d["last_seen"].isoformat() if d["last_seen"] else None,
+            "last_sync_ms": last_sync_ms,
+            "last_seen_ms": int(d["last_seen"].timestamp() * 1000) if d["last_seen"] else None,
             "mag_x": latest["mag_x"] if latest else 0,
             "mag_y": latest["mag_y"] if latest else 0,
             "mag_z": latest["mag_z"] if latest else 0,
             "seizure_flag": seizure_flag,
             "connected": connected
         })
+
     return output
+
 
 # -----------------------
 # ROOT
