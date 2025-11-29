@@ -308,7 +308,7 @@ async def get_device_history(device_id: str, current_user=Depends(get_current_us
     )
     if not r:
         raise HTTPException(status_code=403, detail="Not your device")
-    
+
     rows = await database.fetch_all(
         device_data.select()
         .where(device_data.c.device_id == device_id)
@@ -319,14 +319,17 @@ async def get_device_history(device_id: str, current_user=Depends(get_current_us
     result = []
     for row in rows:
         payload = json.loads(row["payload"])
-        ts = to_pht(row["timestamp"])
         result.append({
             "id": row["id"],
             "device_id": row["device_id"],
-            "timestamp": ts.strftime("%I:%M %p"),
-            "payload": payload,
+            "timestamp": ts_pht_iso(row["timestamp"]),
+            "mag_x": payload.get("mag_x"),
+            "mag_y": payload.get("mag_y"),
+            "mag_z": payload.get("mag_z"),
             "battery_percent": payload.get("battery_percent", 100),
+            "seizure_flag": payload.get("seizure_flag", False)
         })
+
     return result
 
 
@@ -338,11 +341,11 @@ async def get_seizure_events(current_user=Depends(get_current_user)):
         .where(seizure_events.c.user_id == current_user["id"])
         .order_by(seizure_events.c.timestamp.desc())
     )
+
     return [{
-        "timestamp": to_pht(r["timestamp"]).strftime("%I:%M %p"),
+        "timestamp": ts_pht_iso(r["timestamp"]),
         "device_ids": r["device_ids"].split(",")
     } for r in rows]
-
 
 @app.get("/api/seizure_events/latest")
 async def get_latest_event(current_user=Depends(get_current_user)):
@@ -361,26 +364,46 @@ async def get_all_seizure_events(current_user=Depends(get_current_user)):
     result = []
 
     for r in rows:
-        ts = ts_pht_iso(r["timestamp"])
+        ts = r["timestamp"]
+        ts_iso = ts_pht_iso(ts)
 
+        # CLASSIFY SEIZURE TYPE
         device_ids = r["device_ids"].split(",")
-        device_values = []
+        seizure_type = "GTCS" if len(device_ids) >= 3 else "Jerk"
 
+        # DURATION (look 15 seconds back)
+        previous_row = await database.fetch_one(
+            seizure_events.select()
+            .where(seizure_events.c.user_id == current_user["id"])
+            .where(seizure_events.c.timestamp < ts)
+            .order_by(seizure_events.c.timestamp.desc())
+            .limit(1)
+        )
+
+        if previous_row:
+            duration_seconds = int((ts - previous_row["timestamp"]).total_seconds())
+        else:
+            duration_seconds = 15  # default
+
+        # DEVICE VALUES
+        device_values = []
         for did in device_ids:
             row_data = await database.fetch_one(
                 device_data.select()
                 .where(device_data.c.device_id == did)
-                .where(device_data.c.timestamp <= r["timestamp"])
+                .where(device_data.c.timestamp <= ts)
                 .order_by(device_data.c.timestamp.desc())
                 .limit(1)
             )
+
             if row_data:
                 payload = json.loads(row_data["payload"])
-                # Get device label
+
                 dev_info = await database.fetch_one(
                     devices.select().where(devices.c.device_id == did)
                 )
-                label = dev_info["label"] if dev_info else did
+                label = dev_info["label"] if dev_info else f"Device {did}"
+
                 device_values.append({
                     "device_id": did,
                     "label": label,
@@ -390,11 +413,16 @@ async def get_all_seizure_events(current_user=Depends(get_current_user)):
                     "battery_percent": payload.get("battery_percent", 100),
                     "seizure_flag": payload.get("seizure_flag", False)
                 })
+
         result.append({
-            "timestamp": ts,
+            "timestamp": ts_iso,
+            "type": seizure_type,
+            "duration": duration_seconds,
             "device_values": device_values
         })
+
     return result
+
 
 #DEVICE UPLOAD
 @app.post("/api/device/upload")
