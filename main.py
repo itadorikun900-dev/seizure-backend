@@ -79,6 +79,23 @@ seizure_events = sqlalchemy.Table(
     sqlalchemy.Column("device_ids", sqlalchemy.String),
 )
 
+device_seizure_sessions = sqlalchemy.Table(
+    "device_seizure_sessions", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("device_id", sqlalchemy.String, index=True),
+    sqlalchemy.Column("start_time", sqlalchemy.DateTime(timezone=True)),
+    sqlalchemy.Column("end_time", sqlalchemy.DateTime(timezone=True), nullable=True),
+)
+
+user_seizure_sessions = sqlalchemy.Table(
+    "user_seizure_sessions", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("user_id", sqlalchemy.Integer, sqlalchemy.ForeignKey("users.id")),
+    sqlalchemy.Column("type", sqlalchemy.String),
+    sqlalchemy.Column("start_time", sqlalchemy.DateTime(timezone=True)),
+    sqlalchemy.Column("end_time", sqlalchemy.DateTime(timezone=True), nullable=True),
+)
+
 metadata.create_all(engine)
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "CHANGE_THIS_SECRET")
@@ -145,6 +162,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise exc
     return user
 
+async def get_active_device_seizure(device_id: str):
+    return await database.fetch_one(
+        device_seizure_sessions.select()
+        .where(device_seizure_sessions.c.device_id == device_id)
+        .where(device_seizure_sessions.c.end_time == None)
+    )
+
+async def get_active_user_seizure(user_id: int, seizure_type: str):
+    return await database.fetch_one(
+        user_seizure_sessions.select()
+        .where(user_seizure_sessions.c.user_id == user_id)
+        .where(user_seizure_sessions.c.type == seizure_type)
+        .where(user_seizure_sessions.c.end_time == None)
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -152,6 +184,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 #DEVICE CONNECTION LOGGING
 device_states = {}
@@ -337,92 +370,53 @@ async def get_device_history(device_id: str, current_user=Depends(get_current_us
 @app.get("/api/seizure_events")
 async def get_seizure_events(current_user=Depends(get_current_user)):
     rows = await database.fetch_all(
-        seizure_events.select()
-        .where(seizure_events.c.user_id == current_user["id"])
-        .order_by(seizure_events.c.timestamp.desc())
+        user_seizure_sessions.select()
+        .where(user_seizure_sessions.c.user_id == current_user["id"])
+        .order_by(user_seizure_sessions.c.start_time.desc())
     )
-
-    return [{
-        "timestamp": ts_pht_iso(r["timestamp"]),
-        "device_ids": r["device_ids"].split(",")
-    } for r in rows]
+    result = []
+    for r in rows:
+        start = ts_pht_iso(r["start_time"])
+        end = ts_pht_iso(r["end_time"]) if r["end_time"] else None
+        result.append({
+            "type": r["type"],
+            "start": start,
+            "end": end
+        })
+    return result
 
 @app.get("/api/seizure_events/latest")
 async def get_latest_event(current_user=Depends(get_current_user)):
-    rows = await get_all_seizure_events(current_user=current_user)
-    return rows[0] if rows else {}
-
+    rows = await database.fetch_all(
+        user_seizure_sessions.select()
+        .where(user_seizure_sessions.c.user_id == current_user["id"])
+        .order_by(user_seizure_sessions.c.start_time.desc())
+        .limit(1)
+    )
+    if rows:
+        r = rows[0]
+        return {
+            "type": r["type"],
+            "start": ts_pht_iso(r["start_time"]),
+            "end": ts_pht_iso(r["end_time"]) if r["end_time"] else None
+        }
+    return {}
 
 @app.get("/api/seizure_events/all")
 async def get_all_seizure_events(current_user=Depends(get_current_user)):
     rows = await database.fetch_all(
-        seizure_events.select()
-        .where(seizure_events.c.user_id == current_user["id"])
-        .order_by(seizure_events.c.timestamp.desc())
+        user_seizure_sessions.select()
+        .where(user_seizure_sessions.c.user_id == current_user["id"])
+        .order_by(user_seizure_sessions.c.start_time.desc())
     )
-
     result = []
-
     for r in rows:
-        ts = r["timestamp"]
-        ts_iso = ts_pht_iso(ts)
-
-        # CLASSIFY SEIZURE TYPE
-        device_ids = r["device_ids"].split(",")
-        seizure_type = "GTCS" if len(device_ids) >= 3 else "Jerk"
-
-        # DURATION (look 15 seconds back)
-        previous_row = await database.fetch_one(
-            seizure_events.select()
-            .where(seizure_events.c.user_id == current_user["id"])
-            .where(seizure_events.c.timestamp < ts)
-            .order_by(seizure_events.c.timestamp.desc())
-            .limit(1)
-        )
-
-        if previous_row:
-            duration_seconds = int((ts - previous_row["timestamp"]).total_seconds())
-        else:
-            duration_seconds = 15  # default
-
-        # DEVICE VALUES
-        device_values = []
-        for did in device_ids:
-            row_data = await database.fetch_one(
-                device_data.select()
-                .where(device_data.c.device_id == did)
-                .where(device_data.c.timestamp <= ts)
-                .order_by(device_data.c.timestamp.desc())
-                .limit(1)
-            )
-
-            if row_data:
-                payload = json.loads(row_data["payload"])
-
-                dev_info = await database.fetch_one(
-                    devices.select().where(devices.c.device_id == did)
-                )
-                label = dev_info["label"] if dev_info else f"Device {did}"
-
-                device_values.append({
-                    "device_id": did,
-                    "label": label,
-                    "mag_x": payload.get("mag_x"),
-                    "mag_y": payload.get("mag_y"),
-                    "mag_z": payload.get("mag_z"),
-                    "battery_percent": payload.get("battery_percent", 100),
-                    "seizure_flag": payload.get("seizure_flag", False)
-                })
-
         result.append({
-            "timestamp": ts_iso,
-            "type": seizure_type,
-            "duration": duration_seconds,
-            "device_values": device_values
+            "type": r["type"],
+            "start": ts_pht_iso(r["start_time"]),
+            "end": ts_pht_iso(r["end_time"]) if r["end_time"] else None
         })
-
     return result
-
 
 #DEVICE UPLOAD
 @app.post("/api/device/upload")
@@ -434,11 +428,11 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
         raise HTTPException(status_code=403, detail="Unknown device_id")
 
     ts_val = payload.timestamp_ms
-    if ts_val > 1e12:  
+    if ts_val > 1e12:
         ts_val = ts_val / 1000.0
-
     ts_utc = datetime.utcfromtimestamp(ts_val).replace(tzinfo=timezone.utc)
 
+    # Save sensor_data
     await database.execute(sensor_data.insert().values(
         device_id=payload.device_id,
         timestamp=ts_utc,
@@ -449,55 +443,95 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
         seizure_flag=payload.seizure_flag
     ))
 
-    raw_json = {
-        "device_id": payload.device_id,
-        "timestamp_ms": payload.timestamp_ms,
-        "battery_percent": payload.battery_percent,
-        "seizure_flag": payload.seizure_flag,
-        "mag_x": payload.mag_x,
-        "mag_y": payload.mag_y,
-        "mag_z": payload.mag_z
-    }
-
+    # Save raw device_data
     await database.execute(device_data.insert().values(
         device_id=payload.device_id,
         timestamp=ts_utc,
-        payload=json.dumps(raw_json)
+        payload=json.dumps(payload.dict())
     ))
 
+    # --- Individual device session ---
+    active_device = await get_active_device_seizure(payload.device_id)
     if payload.seizure_flag:
-        user_id = existing["user_id"]
-        window_start = ts_utc - timedelta(seconds=5)
-
-        user_devices = await database.fetch_all(devices.select().where(devices.c.user_id == user_id))
-        ids = [d["device_id"] for d in user_devices]
-
-        recent_rows = await database.fetch_all(
-            device_data.select()
-            .where(device_data.c.device_id.in_(ids))
-            .where(device_data.c.timestamp >= window_start)
-        )
-
-        triggered = list({
-            r["device_id"]
-            for r in recent_rows
-            if json.loads(r["payload"]).get("seizure_flag")
-        })
-
-        if len(triggered) >= 3:
-            recent_log = await database.fetch_one(
-                seizure_events.select()
-                .where(seizure_events.c.user_id == user_id)
-                .where(seizure_events.c.timestamp >= window_start)
+        if not active_device:
+            await database.execute(
+                device_seizure_sessions.insert().values(
+                    device_id=payload.device_id,
+                    start_time=ts_utc,
+                    end_time=None
+                )
             )
-            if not recent_log:
-                await database.execute(seizure_events.insert().values(
-                    user_id=user_id,
-                    timestamp=ts_utc,
-                    device_ids=",".join(triggered)
-                ))
+    else:
+        if active_device:
+            await database.execute(
+                device_seizure_sessions.update()
+                .where(device_seizure_sessions.c.id == active_device["id"])
+                .values(end_time=ts_utc)
+            )
+
+    # --- User-wide seizure session logic ---
+    user_id = existing["user_id"]
+    user_devices = await database.fetch_all(devices.select().where(devices.c.user_id == user_id))
+    device_ids = [d["device_id"] for d in user_devices]
+
+    # Get latest reading per device
+    recent_rows = []
+    for did in device_ids:
+        row = await database.fetch_one(
+            sensor_data.select()
+            .where(sensor_data.c.device_id == did)
+            .order_by(sensor_data.c.timestamp.desc())
+            .limit(1)
+        )
+        if row:
+            recent_rows.append(row)
+
+    triggered_count = sum(1 for r in recent_rows if r["seizure_flag"])
+
+    # GTCS logic
+    if triggered_count >= 3:
+        # Start GTCS session
+        active_session = await get_active_user_seizure(user_id, "GTCS")
+        if not active_session:
+            await database.execute(user_seizure_sessions.insert().values(
+                user_id=user_id,
+                type="GTCS",
+                start_time=ts_utc,
+                end_time=None
+            ))
+        # End Jerk session if exists
+        jerk_session = await get_active_user_seizure(user_id, "Jerk")
+        if jerk_session:
+            await database.execute(user_seizure_sessions.update()
+                                   .where(user_seizure_sessions.c.id == jerk_session["id"])
+                                   .values(end_time=ts_utc))
+    elif triggered_count >= 1:
+        # Start Jerk session
+        active_session = await get_active_user_seizure(user_id, "Jerk")
+        if not active_session:
+            await database.execute(user_seizure_sessions.insert().values(
+                user_id=user_id,
+                type="Jerk",
+                start_time=ts_utc,
+                end_time=None
+            ))
+        # End GTCS session if exists
+        gtcs_session = await get_active_user_seizure(user_id, "GTCS")
+        if gtcs_session:
+            await database.execute(user_seizure_sessions.update()
+                                   .where(user_seizure_sessions.c.id == gtcs_session["id"])
+                                   .values(end_time=ts_utc))
+    else:
+        # End all sessions if no seizure_flag
+        for stype in ["GTCS", "Jerk"]:
+            session = await get_active_user_seizure(user_id, stype)
+            if session:
+                await database.execute(user_seizure_sessions.update()
+                                       .where(user_seizure_sessions.c.id == session["id"])
+                                       .values(end_time=ts_utc))
 
     return {"status": "saved"}
+
 
 # LATEST SENSOR DATA
 @app.get("/api/mydevices_with_latest_data")
