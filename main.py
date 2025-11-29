@@ -295,6 +295,9 @@ async def delete_device(device_id: str, current_user=Depends(get_current_user)):
     return {"status": "deleted", "device_id": device_id}
 
 #DEVICE HISTORY
+def ts_pht_iso(dt_utc: datetime) -> str:
+    return to_pht(dt_utc).isoformat()
+
 @app.get("/api/devices/{device_id}", response_model=List[dict])
 async def get_device_history(device_id: str, current_user=Depends(get_current_user)):
     r = await database.fetch_one(
@@ -343,29 +346,55 @@ async def get_seizure_events(current_user=Depends(get_current_user)):
 
 @app.get("/api/seizure_events/latest")
 async def get_latest_event(current_user=Depends(get_current_user)):
-    row = await database.fetch_one(
-        seizure_events.select()
-        .where(seizure_events.c.user_id == current_user["id"])
-        .order_by(seizure_events.c.timestamp.desc())
-        .limit(1)
-    )
-    if not row:
-        return {}
-    return {
-        "timestamp": to_pht(row["timestamp"]).isoformat(),
-        "device_ids": row["device_ids"].split(",")
-    }
+    rows = await get_all_seizure_events(current_user=current_user)
+    return rows[0] if rows else {}
 
 
 @app.get("/api/seizure_events/all")
 async def get_all_seizure_events(current_user=Depends(get_current_user)):
     rows = await database.fetch_all(
-        seizure_events.select().order_by(seizure_events.c.timestamp.desc())
+        seizure_events.select()
+        .where(seizure_events.c.user_id == current_user["id"])
+        .order_by(seizure_events.c.timestamp.desc())
     )
-    return [{
-        "timestamp": to_pht(r["timestamp"]).isoformat(),
-        "device_ids": r["device_ids"].split(",")
-    } for r in rows]
+
+    result = []
+
+    for r in rows:
+        ts = ts_pht_iso(r["timestamp"])
+
+        device_ids = r["device_ids"].split(",")
+        device_values = []
+
+        for did in device_ids:
+            row_data = await database.fetch_one(
+                device_data.select()
+                .where(device_data.c.device_id == did)
+                .where(device_data.c.timestamp <= r["timestamp"])
+                .order_by(device_data.c.timestamp.desc())
+                .limit(1)
+            )
+            if row_data:
+                payload = json.loads(row_data["payload"])
+                # Get device label
+                dev_info = await database.fetch_one(
+                    devices.select().where(devices.c.device_id == did)
+                )
+                label = dev_info["label"] if dev_info else did
+                device_values.append({
+                    "device_id": did,
+                    "label": label,
+                    "mag_x": payload.get("mag_x"),
+                    "mag_y": payload.get("mag_y"),
+                    "mag_z": payload.get("mag_z"),
+                    "battery_percent": payload.get("battery_percent", 100),
+                    "seizure_flag": payload.get("seizure_flag", False)
+                })
+        result.append({
+            "timestamp": ts,
+            "device_values": device_values
+        })
+    return result
 
 #DEVICE UPLOAD
 @app.post("/api/device/upload")
