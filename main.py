@@ -281,31 +281,6 @@ async def admin_get_user_events(user_id: int, current_user=Depends(get_current_u
     return result
 
 
-@app.get("/api/admin/device/{device_id}/history")
-async def admin_get_device_history(device_id: str, current_user=Depends(get_current_user)):
-    if not current_user["is_admin"]:
-        raise HTTPException(status_code=403, detail="Admins only")
-
-    rows = await database.fetch_all(
-        device_data.select()
-        .where(device_data.c.device_id == device_id)
-        .order_by(device_data.c.timestamp.desc())
-        .limit(500)
-    )
-
-    result = []
-    for row in rows:
-        payload = json.loads(row["payload"])
-        result.append({
-            "timestamp": ts_pht_iso(row["timestamp"]),
-            "mag_x": payload.get("mag_x"),
-            "mag_y": payload.get("mag_y"),
-            "mag_z": payload.get("mag_z"),
-            "battery_percent": payload.get("battery_percent"),
-            "seizure_flag": payload.get("seizure_flag"),
-        })
-
-    return result
 
 @app.delete("/api/delete_user/{user_id}")
 async def delete_user(user_id: int, current_user=Depends(get_current_user)):
@@ -321,40 +296,6 @@ async def delete_user(user_id: int, current_user=Depends(get_current_user)):
     
     return {"detail": f"User {user['username']} deleted successfully"}
 
-app.get("/api/admin/user/{user_id}/events_paginated")
-async def admin_get_user_events_paginated(
-    user_id: int,
-    page: int = Query(0, ge=0),
-    limit: int = Query(8, ge=1),
-    current_user=Depends(get_current_user)
-):
-    """
-    Returns seizure events of a user with pagination.
-    - page: starts from 0
-    - limit: number of events per page
-    """
-    if not current_user["is_admin"]:
-        raise HTTPException(status_code=403, detail="Admins only")
-
-    rows = await database.fetch_all(
-        user_seizure_sessions.select()
-        .where(user_seizure_sessions.c.user_id == user_id)
-        .order_by(user_seizure_sessions.c.start_time.desc())
-    )
-
-    start_index = page * limit
-    end_index = start_index + limit
-    paginated_rows = rows[start_index:end_index]
-
-    result = []
-    for r in paginated_rows:
-        result.append({
-            "type": r["type"],
-            "start": ts_pht_iso(r["start_time"]),
-            "end": ts_pht_iso(r["end_time"]) if r["end_time"] else None
-        })
-
-    return result
 
 @app.get("/api/admin/user/{user_id}/events/{start}/data")
 async def get_event_sensor_data(user_id: int, start: str, current_user=Depends(get_current_user)):
@@ -382,6 +323,59 @@ async def get_event_sensor_data(user_id: int, start: str, current_user=Depends(g
             "seizure_flag": r["seizure_flag"],
         })
     return result
+
+# SEIZURE EVENTS
+@app.get("/api/seizure_events")
+async def get_seizure_events(current_user=Depends(get_current_user)):
+    rows = await database.fetch_all(
+        user_seizure_sessions.select()
+        .where(user_seizure_sessions.c.user_id == current_user["id"])
+        .order_by(user_seizure_sessions.c.start_time.desc())
+    )
+    result = []
+    for r in rows:
+        start = ts_pht_iso(r["start_time"])
+        end = ts_pht_iso(r["end_time"]) if r["end_time"] else None
+        result.append({
+            "type": r["type"],
+            "start": start,
+            "end": end
+        })
+    return result
+
+@app.get("/api/seizure_events/latest")
+async def get_latest_event(current_user=Depends(get_current_user)):
+    rows = await database.fetch_all(
+        user_seizure_sessions.select()
+        .where(user_seizure_sessions.c.user_id == current_user["id"])
+        .order_by(user_seizure_sessions.c.start_time.desc())
+        .limit(1)
+    )
+    if rows:
+        r = rows[0]
+        return {
+            "type": r["type"],
+            "start": ts_pht_iso(r["start_time"]),
+            "end": ts_pht_iso(r["end_time"]) if r["end_time"] else None
+        }
+    return {}
+
+@app.get("/api/seizure_events/all")
+async def get_all_seizure_events(current_user=Depends(get_current_user)):
+    rows = await database.fetch_all(
+        user_seizure_sessions.select()
+        .where(user_seizure_sessions.c.user_id == current_user["id"])
+        .order_by(user_seizure_sessions.c.start_time.desc())
+    )
+    result = []
+    for r in rows:
+        result.append({
+            "type": r["type"],
+            "start": ts_pht_iso(r["start_time"]),
+            "end": ts_pht_iso(r["end_time"]) if r["end_time"] else None
+        })
+    return result
+
 #USER ROUTES
 @app.post("/api/register")
 async def register(u: UserCreate):
@@ -516,57 +510,6 @@ async def get_device_history(device_id: str, current_user=Depends(get_current_us
     return result
 
 
-# SEIZURE EVENTS
-@app.get("/api/seizure_events")
-async def get_seizure_events(current_user=Depends(get_current_user)):
-    rows = await database.fetch_all(
-        user_seizure_sessions.select()
-        .where(user_seizure_sessions.c.user_id == current_user["id"])
-        .order_by(user_seizure_sessions.c.start_time.desc())
-    )
-    result = []
-    for r in rows:
-        start = ts_pht_iso(r["start_time"])
-        end = ts_pht_iso(r["end_time"]) if r["end_time"] else None
-        result.append({
-            "type": r["type"],
-            "start": start,
-            "end": end
-        })
-    return result
-
-@app.get("/api/seizure_events/latest")
-async def get_latest_event(current_user=Depends(get_current_user)):
-    rows = await database.fetch_all(
-        user_seizure_sessions.select()
-        .where(user_seizure_sessions.c.user_id == current_user["id"])
-        .order_by(user_seizure_sessions.c.start_time.desc())
-        .limit(1)
-    )
-    if rows:
-        r = rows[0]
-        return {
-            "type": r["type"],
-            "start": ts_pht_iso(r["start_time"]),
-            "end": ts_pht_iso(r["end_time"]) if r["end_time"] else None
-        }
-    return {}
-
-@app.get("/api/seizure_events/all")
-async def get_all_seizure_events(current_user=Depends(get_current_user)):
-    rows = await database.fetch_all(
-        user_seizure_sessions.select()
-        .where(user_seizure_sessions.c.user_id == current_user["id"])
-        .order_by(user_seizure_sessions.c.start_time.desc())
-    )
-    result = []
-    for r in rows:
-        result.append({
-            "type": r["type"],
-            "start": ts_pht_iso(r["start_time"]),
-            "end": ts_pht_iso(r["end_time"]) if r["end_time"] else None
-        })
-    return result
 
 #DEVICE UPLOAD
 @app.post("/api/device/upload")
