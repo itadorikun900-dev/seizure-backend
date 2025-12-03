@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Body
+from fastapi import FastAPI, Depends, HTTPException, Body, Query
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone
@@ -321,6 +321,67 @@ async def delete_user(user_id: int, current_user=Depends(get_current_user)):
     
     return {"detail": f"User {user['username']} deleted successfully"}
 
+app.get("/api/admin/user/{user_id}/events_paginated")
+async def admin_get_user_events_paginated(
+    user_id: int,
+    page: int = Query(0, ge=0),
+    limit: int = Query(8, ge=1),
+    current_user=Depends(get_current_user)
+):
+    """
+    Returns seizure events of a user with pagination.
+    - page: starts from 0
+    - limit: number of events per page
+    """
+    if not current_user["is_admin"]:
+        raise HTTPException(status_code=403, detail="Admins only")
+
+    rows = await database.fetch_all(
+        user_seizure_sessions.select()
+        .where(user_seizure_sessions.c.user_id == user_id)
+        .order_by(user_seizure_sessions.c.start_time.desc())
+    )
+
+    start_index = page * limit
+    end_index = start_index + limit
+    paginated_rows = rows[start_index:end_index]
+
+    result = []
+    for r in paginated_rows:
+        result.append({
+            "type": r["type"],
+            "start": ts_pht_iso(r["start_time"]),
+            "end": ts_pht_iso(r["end_time"]) if r["end_time"] else None
+        })
+
+    return result
+
+@app.get("/api/admin/user/{user_id}/events/{start}/data")
+async def get_event_sensor_data(user_id: int, start: str, current_user=Depends(get_current_user)):
+    if not current_user["is_admin"]:
+        raise HTTPException(status_code=403, detail="Admins only")
+    
+    start_dt = datetime.fromisoformat(start)
+    rows = await database.fetch_all(
+        sensor_data.select()
+        .where(sensor_data.c.device_id.in_(
+            [d["device_id"] for d in await database.fetch_all(devices.select().where(devices.c.user_id==user_id))]
+        ))
+        .where(sensor_data.c.timestamp >= start_dt)
+        .order_by(sensor_data.c.timestamp.asc())
+    )
+    
+    result = []
+    for r in rows:
+        result.append({
+            "timestamp": ts_pht_iso(r["timestamp"]),
+            "mag_x": r["mag_x"],
+            "mag_y": r["mag_y"],
+            "mag_z": r["mag_z"],
+            "battery_percent": r["battery_percent"],
+            "seizure_flag": r["seizure_flag"],
+        })
+    return result
 #USER ROUTES
 @app.post("/api/register")
 async def register(u: UserCreate):
