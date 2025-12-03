@@ -291,9 +291,12 @@ async def delete_user(user_id: int, current_user=Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    query = users.delete().where(users.c.id == user_id)
-    await database.execute(query)
-    
+    delete_devices_query = devices.delete().where(devices.c.user_id == user_id)
+    await database.execute(delete_devices_query)
+
+    delete_user_query = users.delete().where(users.c.id == user_id)
+    await database.execute(delete_user_query)
+
     return {"detail": f"User {user['username']} deleted successfully"}
 
 
