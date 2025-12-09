@@ -657,7 +657,7 @@ async def get_my_devices_with_latest(current_user=Depends(get_current_user)):
 
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"message": "Backend running"}
 
