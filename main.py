@@ -185,10 +185,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+    metadata.create_all(engine)
+    asyncio.create_task(log_device_status_changes())
+
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok", "db": DATABASE_URL}
 
 #DEVICE CONNECTION LOGGING
 device_states = {}
-
 async def log_device_status_changes():
     while True:
         now = datetime.now(PHT)
@@ -218,18 +230,7 @@ async def log_device_status_changes():
 
         await asyncio.sleep(1)
 
-@app.on_event("startup")
-async def startup():
-    await database.connect()
-    asyncio.create_task(log_device_status_changes())
 
-@app.on_event("shutdown")
-async def shutdown():
-    await database.disconnect()
-
-@app.get("/api/health")
-async def health_check():
-    return {"status": "ok", "db": DATABASE_URL}
 
 # ADMIN ROUTES
 @app.get("/api/users")
