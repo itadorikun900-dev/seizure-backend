@@ -302,19 +302,23 @@ async def delete_user(user_id: int, current_user=Depends(get_current_user)):
 
 
 @app.get("/api/admin/user/{user_id}/events/{start}/data")
-async def get_event_sensor_data(user_id: int, start: str, current_user=Depends(get_current_user)):
+async def get_event_sensor_data(user_id: int, start: str, end: str, current_user=Depends(get_current_user)):
     if not current_user["is_admin"]:
         raise HTTPException(status_code=403, detail="Admins only")
-    
-    start_dt = datetime.fromisoformat(start)
-    rows = await database.fetch_all(
-        sensor_data.select()
-        .where(sensor_data.c.device_id.in_(
+
+    start_dt = datetime.fromisoformat(start).astimezone(timezone.utc)
+    end_dt = datetime.fromisoformat(end).astimezone(timezone.utc) if end else None
+
+    query = sensor_data.select().where(
+        sensor_data.c.device_id.in_(
             [d["device_id"] for d in await database.fetch_all(devices.select().where(devices.c.user_id==user_id))]
-        ))
-        .where(sensor_data.c.timestamp >= start_dt)
-        .order_by(sensor_data.c.timestamp.asc())
+        ) & (sensor_data.c.timestamp >= start_dt)
     )
+
+    if end_dt:
+        query = query.where(sensor_data.c.timestamp <= end_dt)
+
+    rows = await database.fetch_all(query.order_by(sensor_data.c.timestamp.asc()))
     
     result = []
     for r in rows:
