@@ -14,6 +14,7 @@ from sqlalchemy import and_
 from fastapi.responses import StreamingResponse
 import csv
 import io
+import math
 
 PHT = timezone(timedelta(hours=8))
 
@@ -141,9 +142,43 @@ class UnifiedESP32Payload(BaseModel):
     timestamp_ms: int
     battery_percent: int
     seizure_flag: bool
-    mag_x: int
-    mag_y: int
-    mag_z: int
+    accel_x: float
+    accel_y: float
+    accel_z: float
+    gyro_x: float
+    gyro_y: float
+    gyro_z: float
+
+# ============= CONVERSION FUNCTION =============
+
+def convert_accel_gyro_to_magnetometer(accel_x: float, accel_y: float, accel_z: float,
+                                       gyro_x: float, gyro_y: float, gyro_z: float) -> tuple:
+    """
+    Convert accelerometer and gyroscope readings to simulated magnetometer values.
+    This allows the app to display the same mag_x, mag_y, mag_z format.
+    
+    Conversion logic:
+    - mag_x = accel_x normalized + gyro_x scaled
+    - mag_y = accel_y normalized + gyro_y scaled
+    - mag_z = accel_z normalized + gyro_z scaled
+    """
+    
+    # Normalize accelerometer (range: -1 to 1 approximately, representing -16g to +16g)
+    accel_norm_x = accel_x / 16.0 * 100
+    accel_norm_y = accel_y / 16.0 * 100
+    accel_norm_z = accel_z / 16.0 * 100
+    
+    # Scale gyroscope (range: -2000 to 2000 °/s)
+    gyro_scaled_x = gyro_x / 2000.0 * 100
+    gyro_scaled_y = gyro_y / 2000.0 * 100
+    gyro_scaled_z = gyro_z / 2000.0 * 100
+    
+    # Combine to create "magnetometer-like" values
+    mag_x = int(accel_norm_x + gyro_scaled_x)
+    mag_y = int(accel_norm_y + gyro_scaled_y)
+    mag_z = int(accel_norm_z + gyro_scaled_z)
+    
+    return mag_x, mag_y, mag_z
 
 # ============= SEIZURE DETECTION HELPER FUNCTIONS =============
 
@@ -529,7 +564,7 @@ async def download_seizure_history(current_user=Depends(get_current_user)):
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-# ============= DATA UPLOAD ENDPOINT (WITH IMPROVED SEIZURE DETECTION) =============
+# ============= DATA UPLOAD ENDPOINT (WITH ACCEL/GYRO CONVERSION) =============
 
 @app.post("/api/device/upload")
 async def upload_from_esp(payload: UnifiedESP32Payload):
@@ -544,13 +579,23 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
         ts_val = ts_val / 1000.0
     ts_utc = datetime.utcfromtimestamp(ts_val).replace(tzinfo=timezone.utc)
 
-    # Save sensor data
+    # ===== CONVERT ACCEL/GYRO TO MAGNETOMETER VALUES =====
+    mag_x, mag_y, mag_z = convert_accel_gyro_to_magnetometer(
+        payload.accel_x,
+        payload.accel_y,
+        payload.accel_z,
+        payload.gyro_x,
+        payload.gyro_y,
+        payload.gyro_z
+    )
+
+    # Save sensor data with CONVERTED mag values
     await database.execute(sensor_data.insert().values(
         device_id=payload.device_id,
         timestamp=ts_utc,
-        mag_x=payload.mag_x,
-        mag_y=payload.mag_y,
-        mag_z=payload.mag_z,
+        mag_x=mag_x,           # CONVERTED from accel_x + gyro_x
+        mag_y=mag_y,           # CONVERTED from accel_y + gyro_y
+        mag_z=mag_z,           # CONVERTED from accel_z + gyro_z
         battery_percent=payload.battery_percent,
         seizure_flag=payload.seizure_flag
     ))
@@ -558,7 +603,19 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
     await database.execute(device_data.insert().values(
         device_id=payload.device_id,
         timestamp=ts_utc,
-        payload=json.dumps(payload.dict())
+        payload=json.dumps({
+            "accel_x": payload.accel_x,
+            "accel_y": payload.accel_y,
+            "accel_z": payload.accel_z,
+            "gyro_x": payload.gyro_x,
+            "gyro_y": payload.gyro_y,
+            "gyro_z": payload.gyro_z,
+            "battery_percent": payload.battery_percent,
+            "seizure_flag": payload.seizure_flag,
+            "mag_x": mag_x,
+            "mag_y": mag_y,
+            "mag_z": mag_z
+        })
     ))
 
     # Device-level seizure tracking
@@ -580,7 +637,7 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
                 .values(end_time=ts_utc)
             )
 
-    # User-level seizure detection (IMPROVED)
+    # User-level seizure detection
     user_id = existing["user_id"]
     user_devices = await database.fetch_all(
         devices.select().where(devices.c.user_id == user_id)
@@ -617,12 +674,9 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
             
             return {"status": "saved"}
 
-    # Jerk: 1-2 devices with seizure activity (isolated spikes)
-    # BUT ONLY if there's NO active GTCS
+    # Jerk: 1-2 devices with seizure activity
     active_gtcs = await get_active_user_seizure(user_id, "GTCS")
     if not active_gtcs and devices_with_seizure >= 1:
-        # Check if GTCS ended recently (within 30 seconds)
-        # If it did, extend GTCS instead of creating Jerk
         recent_gtcs = await database.fetch_one(
             user_seizure_sessions.select()
             .where(user_seizure_sessions.c.user_id == user_id)
@@ -634,16 +688,14 @@ async def upload_from_esp(payload: UnifiedESP32Payload):
         
         if recent_gtcs and recent_gtcs["end_time"]:
             time_since_gtcs_end = (ts_utc - recent_gtcs["end_time"]).total_seconds()
-            # If GTCS ended less than 30 seconds ago, re-open it instead of creating Jerk
             if time_since_gtcs_end < 30:
                 await database.execute(
                     user_seizure_sessions.update()
                     .where(user_seizure_sessions.c.id == recent_gtcs["id"])
-                    .values(end_time=None)  # Re-open GTCS
+                    .values(end_time=None)
                 )
                 return {"status": "saved"}
         
-        # Only create Jerk if GTCS didn't end recently
         active_jerk = await get_active_user_seizure(user_id, "Jerk")
         if not active_jerk:
             await database.execute(user_seizure_sessions.insert().values(
